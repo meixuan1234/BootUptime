@@ -1,0 +1,14 @@
+G:\编程\_其他项目\电脑启动时间\bin\Release\net9.0-windows\BootUptime.exe
+G:\编程\_其他项目\电脑启动时间\bin\Release\net9.0-windows\BootUptime.deps.json
+G:\编程\_其他项目\电脑启动时间\bin\Release\net9.0-windows\BootUptime.runtimeconfig.json
+G:\编程\_其他项目\电脑启动时间\bin\Release\net9.0-windows\BootUptime.dll
+G:\编程\_其他项目\电脑启动时间\bin\Release\net9.0-windows\BootUptime.pdb
+G:\编程\_其他项目\电脑启动时间\obj\Release\net9.0-windows\BootUptime.GeneratedMSBuildEditorConfig.editorconfig
+G:\编程\_其他项目\电脑启动时间\obj\Release\net9.0-windows\BootUptime.AssemblyInfoInputs.cache
+G:\编程\_其他项目\电脑启动时间\obj\Release\net9.0-windows\BootUptime.AssemblyInfo.cs
+G:\编程\_其他项目\电脑启动时间\obj\Release\net9.0-windows\BootUptime.csproj.CoreCompileInputs.cache
+G:\编程\_其他项目\电脑启动时间\obj\Release\net9.0-windows\BootUptime.dll
+G:\编程\_其他项目\电脑启动时间\obj\Release\net9.0-windows\refint\BootUptime.dll
+G:\编程\_其他项目\电脑启动时间\obj\Release\net9.0-windows\BootUptime.pdb
+G:\编程\_其他项目\电脑启动时间\obj\Release\net9.0-windows\BootUptime.genruntimeconfig.cache
+G:\编程\_其他项目\电脑启动时间\obj\Release\net9.0-windows\ref\BootUptime.dll
