@@ -15,7 +15,7 @@ public class UptimeService
     /// 与任务管理器"性能"选项卡中 CPU 板块的运行时间数据源完全一致。
     /// TickCount64 为 Int64 类型，运行约 2.92 亿年后才会溢出，无需处理。
     /// </remarks>
-    public static string GetUptimeString(bool showSeconds = false)
+    public static string GetUptimeString(bool showSeconds = true)
     {
         long uptimeMs = Environment.TickCount64;
         TimeSpan ts = TimeSpan.FromMilliseconds(uptimeMs);

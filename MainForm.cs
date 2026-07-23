@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text.Json;
 
 namespace BootUptime;
 
@@ -40,6 +41,15 @@ public class MainForm : Form
     private readonly ToolStripMenuItem _menuClose;
     private readonly StartupManager _startupManager;
 
+    // ==================== 拖拽状态 ====================
+    private bool _isDragging;
+    private Point _dragStartPoint;
+
+    // ==================== 位置记忆 ====================
+    private static readonly string SettingsDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BootUptime");
+    private static readonly string SettingsFile = Path.Combine(SettingsDir, "settings.json");
+
     /// <summary>
     /// 初始化主窗口：设置外观、创建控件、绑定事件
     /// </summary>
@@ -51,10 +61,13 @@ public class MainForm : Form
         Text = "电脑启动时间";
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
-        Size = new Size(280, 52);
-        // 默认位置：屏幕右上角偏下，避开右上角可能存在的其他悬浮窗
+        Size = new Size(300, 52);
+        // 默认位置：屏幕右上角偏下；若存在历史位置则恢复
+        var saved = LoadSettings();
         var screen = Screen.PrimaryScreen!.WorkingArea;
-        Location = new Point(screen.Right - 290, screen.Top + 60);
+        Location = saved.HasValue
+            ? saved.Value
+            : new Point(screen.Right - 310, screen.Top + 60);
         TopMost = true;
         Opacity = WindowOpacity;
         BackColor = BgColor;
@@ -78,7 +91,7 @@ public class MainForm : Form
         // ---- 运行时间文本 ----
         _uptimeLabel = new Label
         {
-            Text = UptimeService.GetUptimeString(),
+            Text = UptimeService.GetUptimeString(true),
             Font = new Font("Segoe UI", 14f, FontStyle.Regular, GraphicsUnit.Point),
             ForeColor = TextColor,
             BackColor = Color.Transparent,
@@ -139,7 +152,7 @@ public class MainForm : Form
     /// </summary>
     private void RefreshTimer_Tick(object? sender, EventArgs e)
     {
-        _uptimeLabel.Text = UptimeService.GetUptimeString();
+        _uptimeLabel.Text = UptimeService.GetUptimeString(true);
         CenterUptimeLabel();
     }
 
@@ -237,10 +250,47 @@ public class MainForm : Form
             else if (right) m.Result = (IntPtr)HTRIGHT;
             else if (top) m.Result = (IntPtr)HTTOP;
             else if (bottom) m.Result = (IntPtr)HTBOTTOM;
-            else m.Result = (IntPtr)HTCAPTION; // 其余区域视为标题栏，可拖拽
+            else m.Result = (IntPtr)HTCLIENT; // 内部区域由 MouseDown/MouseMove 处理左键拖拽
             return;
         }
         base.WndProc(ref m);
+    }
+
+    /// <summary>
+    /// 左键按下：记录拖拽起始点
+    /// </summary>
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left)
+        {
+            _isDragging = true;
+            _dragStartPoint = e.Location;
+        }
+        base.OnMouseDown(e);
+    }
+
+    /// <summary>
+    /// 鼠标移动：左键拖拽时移动窗口
+    /// </summary>
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        if (_isDragging)
+        {
+            Location = new Point(
+                Location.X + e.X - _dragStartPoint.X,
+                Location.Y + e.Y - _dragStartPoint.Y
+            );
+        }
+        base.OnMouseMove(e);
+    }
+
+    /// <summary>
+    /// 鼠标松开：结束拖拽状态
+    /// </summary>
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        _isDragging = false;
+        base.OnMouseUp(e);
     }
 
     // ==================== 辅助方法 ====================
@@ -257,14 +307,70 @@ public class MainForm : Form
     }
 
     /// <summary>
-    /// 窗体关闭时：停止定时器、释放资源
+    /// 窗体关闭时：保存窗口位置、停止定时器、释放资源
     /// </summary>
-    /// <param name="e"></param>
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        SaveSettings(Location);
         _refreshTimer.Stop();
         _refreshTimer.Dispose();
         _contextMenu.Dispose();
         base.OnFormClosed(e);
+    }
+
+    /// <summary>
+    /// 从 JSON 文件加载上次保存的窗口位置
+    /// </summary>
+    /// <returns>上次保存的位置，若不存在则返回 null</returns>
+    private static Point? LoadSettings()
+    {
+        try
+        {
+            if (!File.Exists(SettingsFile))
+                return null;
+            string json = File.ReadAllText(SettingsFile);
+            var data = JsonSerializer.Deserialize<SettingsData>(json);
+            if (data == null)
+                return null;
+            // 校验坐标在屏幕范围内，避免窗口跑到屏幕外
+            var screen = Screen.PrimaryScreen!.WorkingArea;
+            if (data.X >= screen.Left && data.X < screen.Right - 100
+                && data.Y >= screen.Top && data.Y < screen.Bottom - 30)
+                return new Point(data.X, data.Y);
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 将窗口位置保存到 JSON 文件
+    /// </summary>
+    /// <param name="location">当前窗口位置</param>
+    private static void SaveSettings(Point location)
+    {
+        try
+        {
+            if (!Directory.Exists(SettingsDir))
+                Directory.CreateDirectory(SettingsDir);
+            var data = new SettingsData { X = location.X, Y = location.Y };
+            string json = JsonSerializer.Serialize(data);
+            File.WriteAllText(SettingsFile, json);
+        }
+        catch
+        {
+            // 静默失败
+        }
+    }
+
+    /// <summary>
+    /// 位置持久化数据结构
+    /// </summary>
+    private class SettingsData
+    {
+        public int X { get; set; }
+        public int Y { get; set; }
     }
 }
