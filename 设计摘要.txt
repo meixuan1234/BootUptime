@@ -7,7 +7,7 @@
   .NET 8/9  WinForms  |  自包含单文件发布  |  C# 纯原生实现
 
 【项目结构】
-  Program.cs          - 入口
+  Program.cs          - 入口（单实例 / 崩溃日志 / --selftest 自检）
   MainForm.cs         - 主窗口（UI + 交互 + 菜单）
   UptimeService.cs    - 系统运行时间获取
   StartupManager.cs   - 开机自启/桌面快捷方式管理
@@ -46,3 +46,22 @@
   - 所有快捷方式操作失败均静默处理，不弹窗
   - 窗体缩放越界自动修正
   - EXE 被移动/删除自动重置自启标记
+  - 配置读写全程静默容错，损坏时回退默认值
+
+【健壮性】（2026-10-05 增补）
+  18. 单实例互斥：Local\BootUptime.SingleInstance，重复双击弹提示而非开多个
+  19. 崩溃日志：%LOCALAPPDATA%\BootUptime\error.log
+  20. 全局异常兜底：ThreadException + UnhandledException + Application.Run 的 try/catch
+  21. --selftest 冒烟自检：构造窗口 → Show → DoEvents → Refresh → Close，退出码 0/1
+
+【2026-10-05 修复记录】
+  A. WM_NCHITTEST 取坐标改用 unchecked((short)(...)) 截断
+     原先写 (int)(v & 0xFFFF)：副屏上的负坐标会被当成 65436 之类的大正数，
+     PointToClient 换算出的客户区坐标全错，表现为那台显示器上四条边的缩放热区完全失灵。
+  B. 左键拖拽改为递归挂载到全部子控件
+     原先只重写 Form 的 OnMouseDown/Move/Up，但 Label 拥有独立窗口句柄，
+     鼠标落在时间文字上时消息被 Label 吃掉 —— 而文字几乎占满窗口，等于拖不动。
+     同时把坐标基准由 e.Location（控件相对）改为 Cursor.Position（屏幕坐标）。
+  C. 缩放热区与最小尺寸按 DPI 换算（新增 private int S(int v) => v * DeviceDpi / 96）
+  D. 配置持久化增加 TopMost 字段，关掉"窗口置顶"后重启不再被强制打开
+  E. 补充 LICENSE 文件，修复 DISCLAIMER.md 中指向它的失效链接
