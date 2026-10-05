@@ -17,6 +17,20 @@ public class MainForm : Form
     private static readonly Color BgColor = Color.FromArgb(26, 26, 26);       // #1A1A1A
     private static readonly Color TextColor = Color.FromArgb(200, 200, 200);  // #C8C8C8
 
+    /// <summary>DPI 缩放系数（96 DPI = 1.0）</summary>
+    private float DpiScale => DeviceDpi / 96f;
+
+    /// <summary>
+    /// 把逻辑像素（96 DPI 基准）换算为当前显示器下的物理像素。
+    /// </summary>
+    /// <param name="value">逻辑像素值</param>
+    /// <returns>按当前 DPI 缩放并四舍五入后的像素值</returns>
+    /// <remarks>
+    /// 缩放热区、最小尺寸等常量都是按 96 DPI 写的逻辑像素，必须过一遍本方法换算，
+    /// 否则在 125% / 150% 缩放下热区会偏小、拖拽边缘的手感变差。
+    /// </remarks>
+    private int S(int value) => (int)Math.Round(value * DpiScale);
+
     // ==================== Win32 消息常量 ====================
     private const int WM_NCHITTEST = 0x84;
     private const int HTCLIENT = 1;
@@ -42,8 +56,14 @@ public class MainForm : Form
     private readonly StartupManager _startupManager;
 
     // ==================== 拖拽状态 ====================
+    /// <summary>是否正在拖动窗口</summary>
     private bool _isDragging;
-    private Point _dragStartPoint;
+
+    /// <summary>拖动开始时鼠标的屏幕坐标</summary>
+    private Point _dragStartCursor;
+
+    /// <summary>拖动开始时窗口左上角的屏幕坐标</summary>
+    private Point _dragStartWindow;
 
     // ==================== 位置记忆 ====================
     private static readonly string SettingsDir = Path.Combine(
@@ -62,13 +82,15 @@ public class MainForm : Form
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         Size = new Size(300, 52);
-        // 默认位置：屏幕右上角偏下；若存在历史位置则恢复
+
+        // 恢复上次的位置与置顶偏好；坐标越界（换显示器 / 改分辨率）时停靠到屏幕右上角
         var saved = LoadSettings();
-        var screen = Screen.PrimaryScreen!.WorkingArea;
-        Location = saved.HasValue
-            ? saved.Value
-            : new Point(screen.Right - 310, screen.Top + 60);
-        TopMost = true;
+        Rectangle area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
+        Location = saved != null && saved.HasValidPosition(area)
+            ? new Point(saved.X, saved.Y)
+            : new Point(area.Right - 310, area.Top + 60);
+        TopMost = saved?.TopMost ?? true;
+
         Opacity = WindowOpacity;
         BackColor = BgColor;
         ShowInTaskbar = true;
@@ -134,6 +156,11 @@ public class MainForm : Form
         // ---- 事件绑定 ----
         Load += MainForm_Load;
         Resize += MainForm_Resize;
+
+        // 左键拖拽必须逐个挂到**所有**子控件上：
+        // Label 拥有自己的窗口句柄，鼠标落在文字上时消息被 Label 吃掉，
+        // 只订阅窗体自身会导致"在运行时间文字上按住拖不动窗口"。
+        AttachDrag(this);
     }
 
     // ==================== 事件处理 ====================
@@ -161,9 +188,11 @@ public class MainForm : Form
     /// </summary>
     private void MainForm_Resize(object? sender, EventArgs e)
     {
-        // 强制最小尺寸
-        if (Width < MinWidth) Width = MinWidth;
-        if (Height < MinHeight) Height = MinHeight;
+        // 强制最小尺寸（常量是逻辑像素，需按当前 DPI 换算才能和 MinimumSize 属性一致）
+        int minWidth = S(MinWidth);
+        int minHeight = S(MinHeight);
+        if (Width < minWidth) Width = minWidth;
+        if (Height < minHeight) Height = minHeight;
         CenterUptimeLabel();
     }
 
@@ -232,15 +261,20 @@ public class MainForm : Form
     {
         if (m.Msg == WM_NCHITTEST)
         {
-            // 将屏幕坐标转换为客户区坐标
-            int x = (int)(m.LParam.ToInt64() & 0xFFFF);
-            int y = (int)((m.LParam.ToInt64() >> 16) & 0xFFFF);
-            Point clientPoint = PointToClient(new Point(x, y));
+            // 屏幕坐标存在 LParam 低 32 位（x 在低 16 位、y 在高 16 位），而且是**带符号**的。
+            // 必须用 short 截断取值：若写成 (int)(v & 0xFFFF)，副屏上的负坐标会被当成
+            // 65436 之类的大正数，PointToClient 换算出的客户区坐标全错，
+            // 表现为那台显示器上四条边的缩放热区完全失灵。
+            long lParam = m.LParam.ToInt64();
+            int screenX = unchecked((short)(lParam & 0xFFFF));
+            int screenY = unchecked((short)((lParam >> 16) & 0xFFFF));
+            Point clientPoint = PointToClient(new Point(screenX, screenY));
 
-            bool left = clientPoint.X <= ResizeBorderSize;
-            bool right = clientPoint.X >= ClientSize.Width - ResizeBorderSize;
-            bool top = clientPoint.Y <= ResizeBorderSize;
-            bool bottom = clientPoint.Y >= ClientSize.Height - ResizeBorderSize;
+            int edge = S(ResizeBorderSize);   // 热区按 DPI 换算，高缩放下手感才一致
+            bool left = clientPoint.X <= edge;
+            bool right = clientPoint.X >= ClientSize.Width - edge;
+            bool top = clientPoint.Y <= edge;
+            bool bottom = clientPoint.Y >= ClientSize.Height - edge;
 
             if (top && left) m.Result = (IntPtr)HTTOPLEFT;
             else if (top && right) m.Result = (IntPtr)HTTOPRIGHT;
@@ -257,41 +291,59 @@ public class MainForm : Form
     }
 
     /// <summary>
-    /// 左键按下：记录拖拽起始点
+    /// 递归为窗体及其全部子控件挂载左键拖拽能力。
     /// </summary>
-    protected override void OnMouseDown(MouseEventArgs e)
+    /// <param name="control">目标控件（会一并处理其所有子控件）</param>
+    private void AttachDrag(Control control)
     {
-        if (e.Button == MouseButtons.Left)
-        {
-            _isDragging = true;
-            _dragStartPoint = e.Location;
-        }
-        base.OnMouseDown(e);
+        control.MouseDown += DragMouseDown;
+        control.MouseMove += DragMouseMove;
+        control.MouseUp += DragMouseUp;
+
+        foreach (Control child in control.Controls)
+            AttachDrag(child);
     }
 
     /// <summary>
-    /// 鼠标移动：左键拖拽时移动窗口
+    /// 左键按下：进入拖拽状态，记录鼠标与窗口的起始屏幕坐标。
     /// </summary>
-    protected override void OnMouseMove(MouseEventArgs e)
+    /// <param name="sender">事件源（窗体或任一子控件）</param>
+    /// <param name="e">鼠标事件参数</param>
+    /// <remarks>
+    /// 统一以屏幕坐标（<see cref="Cursor"/>.Position）为基准，而不是 e.Location：
+    /// 后者是"相对当前控件"的坐标，事件源换成子控件后数值含义就变了，
+    /// 位移量会算错。
+    /// </remarks>
+    private void DragMouseDown(object? sender, MouseEventArgs e)
     {
-        if (_isDragging)
-        {
-            Location = new Point(
-                Location.X + e.X - _dragStartPoint.X,
-                Location.Y + e.Y - _dragStartPoint.Y
-            );
-        }
-        base.OnMouseMove(e);
+        if (e.Button != MouseButtons.Left) return;
+
+        _isDragging = true;
+        _dragStartCursor = Cursor.Position;
+        _dragStartWindow = Location;
     }
 
     /// <summary>
-    /// 鼠标松开：结束拖拽状态
+    /// 鼠标移动：拖拽状态下按鼠标位移整体移动窗口。
     /// </summary>
-    protected override void OnMouseUp(MouseEventArgs e)
+    /// <param name="sender">事件源（窗体或任一子控件）</param>
+    /// <param name="e">鼠标事件参数</param>
+    private void DragMouseMove(object? sender, MouseEventArgs e)
     {
-        _isDragging = false;
-        base.OnMouseUp(e);
+        if (!_isDragging) return;
+
+        Point now = Cursor.Position;
+        Location = new Point(
+            _dragStartWindow.X + (now.X - _dragStartCursor.X),
+            _dragStartWindow.Y + (now.Y - _dragStartCursor.Y));
     }
+
+    /// <summary>
+    /// 松开鼠标：结束拖拽状态。
+    /// </summary>
+    /// <param name="sender">事件源（窗体或任一子控件）</param>
+    /// <param name="e">鼠标事件参数</param>
+    private void DragMouseUp(object? sender, MouseEventArgs e) => _isDragging = false;
 
     // ==================== 辅助方法 ====================
 
@@ -311,7 +363,7 @@ public class MainForm : Form
     /// </summary>
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
-        SaveSettings(Location);
+        SaveSettings(Location, TopMost);
         _refreshTimer.Stop();
         _refreshTimer.Dispose();
         _contextMenu.Dispose();
@@ -319,25 +371,20 @@ public class MainForm : Form
     }
 
     /// <summary>
-    /// 从 JSON 文件加载上次保存的窗口位置
+    /// 从 JSON 文件加载上次保存的窗口位置与外观偏好。
     /// </summary>
-    /// <returns>上次保存的位置，若不存在则返回 null</returns>
-    private static Point? LoadSettings()
+    /// <returns>读取到的配置；文件不存在或内容损坏时返回 null</returns>
+    /// <remarks>
+    /// 本方法只负责"读"，坐标是否可用交给 <see cref="SettingsData.HasValidPosition"/> 判断 ——
+    /// 拆开之后，即便坐标已越界，"窗口置顶"这类与坐标无关的偏好仍能保留下来。
+    /// </remarks>
+    private static SettingsData? LoadSettings()
     {
         try
         {
             if (!File.Exists(SettingsFile))
                 return null;
-            string json = File.ReadAllText(SettingsFile);
-            var data = JsonSerializer.Deserialize<SettingsData>(json);
-            if (data == null)
-                return null;
-            // 校验坐标在屏幕范围内，避免窗口跑到屏幕外
-            var screen = Screen.PrimaryScreen!.WorkingArea;
-            if (data.X >= screen.Left && data.X < screen.Right - 100
-                && data.Y >= screen.Top && data.Y < screen.Bottom - 30)
-                return new Point(data.X, data.Y);
-            return null;
+            return JsonSerializer.Deserialize<SettingsData>(File.ReadAllText(SettingsFile));
         }
         catch
         {
@@ -346,31 +393,52 @@ public class MainForm : Form
     }
 
     /// <summary>
-    /// 将窗口位置保存到 JSON 文件
+    /// 把窗口位置与外观偏好写入 JSON 文件。
     /// </summary>
-    /// <param name="location">当前窗口位置</param>
-    private static void SaveSettings(Point location)
+    /// <param name="location">当前窗口左上角坐标</param>
+    /// <param name="topMost">当前是否置顶</param>
+    private static void SaveSettings(Point location, bool topMost)
     {
         try
         {
             if (!Directory.Exists(SettingsDir))
                 Directory.CreateDirectory(SettingsDir);
-            var data = new SettingsData { X = location.X, Y = location.Y };
-            string json = JsonSerializer.Serialize(data);
-            File.WriteAllText(SettingsFile, json);
+            var data = new SettingsData { X = location.X, Y = location.Y, TopMost = topMost };
+            File.WriteAllText(SettingsFile, JsonSerializer.Serialize(data));
         }
         catch
         {
-            // 静默失败
+            // 静默失败：位置记忆属于锦上添花，不能因此打断用户
         }
     }
 
     /// <summary>
-    /// 位置持久化数据结构
+    /// 配置持久化数据结构
     /// </summary>
     private class SettingsData
     {
-        public int X { get; set; }
-        public int Y { get; set; }
+        /// <summary>窗口左上角 X 坐标</summary>
+        public int X { get; set; } = int.MinValue;
+
+        /// <summary>窗口左上角 Y 坐标</summary>
+        public int Y { get; set; } = int.MinValue;
+
+        /// <summary>是否保持窗口置顶，默认开启</summary>
+        public bool TopMost { get; set; } = true;
+
+        /// <summary>
+        /// 判断保存的坐标是否落在指定屏幕工作区内。
+        /// </summary>
+        /// <param name="screen">屏幕工作区矩形</param>
+        /// <returns>坐标可用返回 true</returns>
+        /// <remarks>
+        /// 换了显示器或改了分辨率后，旧坐标可能已经落到屏幕之外；
+        /// 不校验的话会出现"程序启动了但窗口找不着"的情况。
+        /// </remarks>
+        public bool HasValidPosition(Rectangle screen)
+        {
+            return X >= screen.Left && X < screen.Right - 100
+                && Y >= screen.Top && Y < screen.Bottom - 30;
+        }
     }
 }
